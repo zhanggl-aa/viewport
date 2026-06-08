@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>3D 魔方</title>
+
+  <!-- Three.js import map -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #1a1a2e; font-family: 'Segoe UI', system-ui, sans-serif; }
+
+    #container {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    /* UI overlay — buttons and hint text on top of canvas */
+    #ui-overlay {
+      position: fixed;
+      top: 0; left: 0;
+      width: 100%;
+      pointer-events: none;
+      z-index: 10;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    #ui-overlay > * { pointer-events: auto; }
+
+    #btn-scramble {
+      background: rgba(255,255,255,0.12);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(255,255,255,0.2);
+      color: #fff;
+      padding: 12px 32px;
+      border-radius: 30px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.25s ease;
+      user-select: none;
+      letter-spacing: 0.5px;
+      margin-bottom: 12px;
+    }
+    #btn-scramble:hover {
+      background: rgba(255,255,255,0.2);
+      transform: scale(1.05);
+    }
+    #btn-scramble:active { transform: scale(0.95); }
+    #btn-scramble:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    #hint {
+      color: rgba(255,255,255,0.5);
+      font-size: 13px;
+      letter-spacing: 0.3px;
+      text-align: center;
+      pointer-events: none;
+      position: fixed;
+      bottom: 30px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0,0,0,0.4);
+      padding: 8px 18px;
+      border-radius: 20px;
+      backdrop-filter: blur(4px);
+    }
+
+    /* Error fallback (shown if Three.js fails to load) */
+    #fallback {
+      display: none;
+      position: fixed;
+      inset: 0;
+      z-index: 100;
+      background: #1a1a2e;
+      color: #fff;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      gap: 12px;
+      font-size: 18px;
+    }
+    #fallback.visible { display: flex; }
+    #fallback p { color: rgba(255,255,255,0.5); font-size: 14px; }
+  </style>
+
+  <script>
+    // Load timeout: show fallback if module doesn't initialize within 5s
+    setTimeout(() => {
+      if (!document.body.dataset.loaded) {
+        const el = document.getElementById('fallback');
+        if (el) el.classList.add('visible');
+      }
+    }, 5000);
+  </script>
+</head>
+<body>
+
+  <div id="container"></div>
+
+  <div id="ui-overlay">
+    <button id="btn-scramble">🎲 打乱</button>
+  </div>
+
+  <div id="hint">🖱 拖拽旋转 · 点击层转动 · 滚轮缩放</div>
+
+  <div id="fallback">
+    <span>⚠️ 3D 魔方加载失败</span>
+    <p>请检查网络连接或更换浏览器</p>
+  </div>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+    // --- DOM refs ---
+    const container = document.getElementById('container');
+    const fallback = document.getElementById('fallback');
+    const btnScramble = document.getElementById('btn-scramble');
+
+    // Shared references — used by subsequent tasks
+    let scene, camera, renderer, controls, cubeGroup;
+    let autoRotateActive = true;
+    let isAnimating = false;
+    let isScrambling = false;
+
+    try {
+      // --- Scene setup ---
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x1a1a2e);
+
+      camera = new THREE.PerspectiveCamera(40, container.clientWidth / container.clientHeight, 0.1, 100);
+      camera.position.set(5, 4, 6);
+
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(container.clientWidth, container.clientHeight);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      container.appendChild(renderer.domElement);
+
+      // --- Controls ---
+      controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.08;
+      controls.minDistance = 4;
+      controls.maxDistance = 15;
+      controls.target.set(0, 0, 0);
+      controls.update();
+
+      // --- Lights ---
+      const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+      scene.add(ambientLight);
+
+      const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
+      dirLight.position.set(5, 10, 7);
+      scene.add(dirLight);
+
+      const fillLight = new THREE.DirectionalLight(0x8888ff, 0.4);
+      fillLight.position.set(-5, 0, -5);
+      scene.add(fillLight);
+
+      // --- Rubik's Cube construction ---
+      const CUBIE_SIZE = 0.95;
+
+      // Standard Rubik's cube face colors
+      const COLORS = {
+        right:  0xB71234,  // +X Red
+        left:   0xFF5800,  // -X Orange
+        up:     0xFFFFFF,  // +Y White
+        down:   0xFFD500,  // -Y Yellow
+        front:  0x009E60,  // +Z Green
+        back:   0x0051BA,  // -Z Blue
+        inner:  0x222222,  // internal faces
+      };
+
+      /**
+       * Create a material array for a cubie at position (x,y,z).
+       * Returns [right, left, up, down, front, back] materials.
+       */
+      function makeMaterials(x, y, z) {
+        return [
+          new THREE.MeshStandardMaterial({ color: x ===  1 ? COLORS.right  : COLORS.inner, roughness: 0.3, metalness: 0.05 }),
+          new THREE.MeshStandardMaterial({ color: x === -1 ? COLORS.left   : COLORS.inner, roughness: 0.3, metalness: 0.05 }),
+          new THREE.MeshStandardMaterial({ color: y ===  1 ? COLORS.up     : COLORS.inner, roughness: 0.3, metalness: 0.05 }),
+          new THREE.MeshStandardMaterial({ color: y === -1 ? COLORS.down   : COLORS.inner, roughness: 0.3, metalness: 0.05 }),
+          new THREE.MeshStandardMaterial({ color: z ===  1 ? COLORS.front  : COLORS.inner, roughness: 0.3, metalness: 0.05 }),
+          new THREE.MeshStandardMaterial({ color: z === -1 ? COLORS.back   : COLORS.inner, roughness: 0.3, metalness: 0.05 }),
+        ];
+      }
+
+      // All 27 cubies — module-level var for click/rotation tasks
+      window.cubies = [];
+      cubeGroup = new THREE.Group();
+      scene.add(cubeGroup);
+
+      for (let x = -1; x <= 1; x++) {
+        for (let y = -1; y <= 1; y++) {
+          for (let z = -1; z <= 1; z++) {
+            const geo = new THREE.BoxGeometry(CUBIE_SIZE, CUBIE_SIZE, CUBIE_SIZE);
+            const mats = makeMaterials(x, y, z);
+            const mesh = new THREE.Mesh(geo, mats);
+            mesh.position.set(x, y, z);
+            mesh.userData.gridPos = { x, y, z };
+            // Add black edge wireframe for a classic Rubik's cube look
+            const edges = new THREE.EdgesGeometry(geo);
+            const edgeMat = new THREE.LineBasicMaterial({ color: 0x000000 });
+            const wireframe = new THREE.LineSegments(edges, edgeMat);
+            mesh.add(wireframe);
+            cubeGroup.add(mesh);
+            window.cubies.push(mesh);
+          }
+        }
+      }
+
+      window.cubeGroup = cubeGroup;
+
+      // --- Layer rotation ---
+      const ANIMATION_DURATION = 300; // ms
+
+      /**
+       * Get the grid position of a cubie, accounting for cubeGroup transforms.
+       * Snaps to -1, 0, or 1.
+       */
+      function getGridPos(mesh) {
+        const pos = new THREE.Vector3();
+        mesh.getWorldPosition(pos);
+        cubeGroup.updateMatrixWorld(true);
+        const inv = getGridPos._inv || (getGridPos._inv = new THREE.Matrix4());
+        inv.copy(cubeGroup.matrixWorld).invert();
+        pos.applyMatrix4(inv);
+        return {
+          x: Math.round(pos.x),
+          y: Math.round(pos.y),
+          z: Math.round(pos.z),
+        };
+      }
+
+      /**
+       * Rotate a layer of the cube.
+       * @param {'x'|'y'|'z'} axis - Axis to rotate around
+       * @param {number} index  - Layer index (-1, 0, or 1)
+       * @param {number} angle  - Rotation angle in radians
+       * @returns {Promise<void>}
+       */
+      function rotateLayer(axis, index, angle) {
+        return new Promise((resolve) => {
+          isAnimating = true;
+
+          // Find cubies in this layer
+          const layerCubies = window.cubies.filter(c => {
+            const pos = getGridPos(c);
+            const val = Math.round(axis === 'x' ? pos.x : axis === 'y' ? pos.y : pos.z);
+            return val === index;
+          });
+
+          // Create a temporary pivot group
+          const pivot = new THREE.Group();
+          cubeGroup.add(pivot);
+          layerCubies.forEach(c => pivot.attach(c));
+
+          const startTime = performance.now();
+
+          function animateRotation() {
+            const elapsed = performance.now() - startTime;
+            const t = Math.min(elapsed / ANIMATION_DURATION, 1);
+            // Ease-in-out
+            const eased = t < 0.5
+              ? 2 * t * t
+              : 1 - (-2 * t + 2) * (-2 * t + 2) / 2;
+
+            pivot.rotation[axis] = angle * eased;
+
+            if (t < 1) {
+              requestAnimationFrame(animateRotation);
+            } else {
+              // Finalize: snap to exact angle and detach back
+              pivot.rotation[axis] = angle;
+              pivot.updateMatrixWorld(true);
+              const children = [...pivot.children];
+              children.forEach(c => cubeGroup.attach(c));
+              cubeGroup.remove(pivot);
+
+              isAnimating = false;
+              resolve();
+            }
+          }
+
+          animateRotation();
+        });
+      }
+
+      // --- Scramble ---
+      async function scramble(numMoves = 20) {
+        if (isScrambling) return;
+        isScrambling = true;
+        btnScramble.disabled = true;
+
+        const axes = ['x', 'y', 'z'];
+        const indices = [-1, 0, 1];
+        const signs = [-1, 1];
+
+        let lastMove = null;
+
+        for (let i = 0; i < numMoves; i++) {
+          let axis, index, sign;
+          do {
+            axis = axes[Math.floor(Math.random() * 3)];
+            index = indices[Math.floor(Math.random() * 3)];
+            sign = signs[Math.floor(Math.random() * 2)];
+          } while (lastMove && lastMove.axis === axis && lastMove.index === index && lastMove.sign === sign);
+
+          lastMove = { axis, index, sign };
+          await rotateLayer(axis, index, sign * Math.PI / 2);
+        }
+
+        isScrambling = false;
+        btnScramble.disabled = false;
+      }
+
+      btnScramble.addEventListener('click', () => { scramble(20); });
+
+      // --- Click handling ---
+      const raycaster = new THREE.Raycaster();
+      const pointer = new THREE.Vector2();
+      let clickData = null; // { hit, mesh, normal, axis, sign, index, angle }
+
+      renderer.domElement.addEventListener('pointerdown', (event) => {
+        if (isAnimating || isScrambling) return;
+
+        // Store the down position for drag detection
+        clickData = { downX: event.clientX, downY: event.clientY };
+
+        const rect = renderer.domElement.getBoundingClientRect();
+        pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+        pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+        raycaster.setFromCamera(pointer, camera);
+
+        const intersects = raycaster.intersectObjects(window.cubies);
+        if (intersects.length === 0) { clickData = null; return; }
+
+        const hit = intersects[0];
+        const mesh = hit.object;
+        const normal = hit.face.normal.clone();
+        normal.transformDirection(mesh.matrixWorld);
+
+        // Determine dominant axis
+        const absX = Math.abs(normal.x);
+        const absY = Math.abs(normal.y);
+        const absZ = Math.abs(normal.z);
+
+        let axis, sign;
+        if (absX >= absY && absX >= absZ) {
+          axis = 'x';
+          sign = normal.x > 0 ? 1 : -1;
+        } else if (absY >= absX && absY >= absZ) {
+          axis = 'y';
+          sign = normal.y > 0 ? 1 : -1;
+        } else {
+          axis = 'z';
+          sign = normal.z > 0 ? 1 : -1;
+        }
+
+        const pos = getGridPos(mesh);
+        const index = Math.round(axis === 'x' ? pos.x : axis === 'y' ? pos.y : pos.z);
+        const angle = sign * Math.PI / 2;
+
+        clickData = { hit, mesh, axis, index, angle };
+      });
+
+      renderer.domElement.addEventListener('pointermove', (event) => {
+        // If mouse moved significantly since pointerdown, it's a drag — cancel click
+        if (clickData && clickData.downX !== undefined) {
+          const dx = event.clientX - clickData.downX;
+          const dy = event.clientY - clickData.downY;
+          if (dx * dx + dy * dy > 9) { // 3px threshold squared
+            clickData = null;
+          }
+        }
+      });
+
+      renderer.domElement.addEventListener('pointerup', () => {
+        if (clickData && clickData.axis !== undefined) {
+          rotateLayer(clickData.axis, clickData.index, clickData.angle);
+        }
+        clickData = null;
+      });
+
+      // --- Auto-rotation ---
+      controls.addEventListener('start', () => { autoRotateActive = false; });
+      controls.addEventListener('end', () => { autoRotateActive = true; });
+
+      // --- Resize ---
+      window.addEventListener('resize', () => {
+        const w = container.clientWidth;
+        const h = container.clientHeight;
+        camera.aspect = w / h;
+        camera.updateProjectionMatrix();
+        renderer.setSize(w, h);
+      });
+
+      console.log('Scene ready');
+      document.body.dataset.loaded = 'true';
+    } catch (err) {
+      console.error('Failed to initialize Three.js:', err);
+      fallback.classList.add('visible');
+      throw err;
+    }
+
+    // --- Animation loop (outside try for easy modification by later tasks) ---
+    function animate() {
+      requestAnimationFrame(animate);
+      controls?.update();
+
+      // Auto-rotate cubeGroup when idle
+      if (autoRotateActive && cubeGroup && !isAnimating && !isScrambling) {
+        cubeGroup.rotation.y += 0.003;
+      }
+
+      if (renderer && scene && camera) {
+        renderer.render(scene, camera);
+      }
+    }
+    animate();
+  </script>
+</body>
+</html>
